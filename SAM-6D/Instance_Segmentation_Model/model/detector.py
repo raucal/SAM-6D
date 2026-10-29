@@ -238,7 +238,9 @@ class Instance_Segmentation_Model(pl.LightningModule):
         proposal: N_query x imageH x imageW
         depth: imageH x imageW
         """
-        (N_query, imageH, imageW) = proposal.squeeze_().shape
+        # Keep the proposal dimension when exactly one detection survives.
+        # squeeze_() also mutated detections.masks, breaking later serialization.
+        (N_query, imageH, imageW) = proposal.shape
         masked_depth = proposal * (depth[None, ...].repeat(N_query, 1, 1))
         translate = depth_image_to_pointcloud_translate_torch(
             masked_depth, depth_scale, cam_intrinsic

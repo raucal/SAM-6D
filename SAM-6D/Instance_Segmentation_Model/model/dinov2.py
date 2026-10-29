@@ -182,10 +182,9 @@ class CustomDINOv2(pl.LightningModule):
         3. Resize each proposals to predefined longest image size
         """
         num_proposals = len(masks)
-        masks.unsqueeze_(1) # [N_proposal, 1, ImgH, ImgW]
         processed_masks = self.rgb_proposal_processor(
-            masks, boxes
-        ).squeeze_()  # [N, 1, target_size, target_size]
+            masks.unsqueeze(1), boxes
+        ).squeeze(1)  # [N, target_size, target_size], including N=1
         return processed_masks
 
     @torch.no_grad()
