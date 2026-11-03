@@ -1,5 +1,9 @@
 """Run SAM-6D on the prepared PDDL CAD catalog and RealSense captures."""
 from __future__ import annotations
+import sys as _sys
+from pathlib import Path as _Path
+_cad_root = next(p for p in _Path(__file__).resolve().parents if (p/'config/settings.json').is_file())
+_sys.path.insert(0, str(_cad_root/'pipeline'))
 
 import argparse
 import hashlib
@@ -11,9 +15,8 @@ import shutil
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parent
-CORE = ROOT / "SAM-6D"
-DEFAULT_MANIFEST = ROOT.parents[1] / "SAM6D/pipeline/prepared/manifest.json"
+from settings import SAM6D as ROOT, CORE, PREPARED, NATIVE, PIPELINE, path as configured_path
+DEFAULT_MANIFEST = PREPARED / "manifest.json"
 
 
 def read_dataset(path):
@@ -80,7 +83,7 @@ def doctor(base, parts, segmentor="sam", backbone="vit_h"):
               "cuda_available": cuda, "cuda_error": cuda_error,
               "weights": {str(p.relative_to(CORE)): p.is_file() and p.stat().st_size > 0 for p in weights[:2]},
               "pem_checkpoints": [str(p) for p in pem_weights],
-              "pointnet2_extensions": [str(p) for p in (ROOT.parents[1] / "SAM6D/pipeline/native/pointnet2").glob("*.so")],
+              "pointnet2_extensions": [str(p) for p in (NATIVE / "pointnet2").glob("*.so")],
               "fastsam_ready": fastsam_weight.is_file() and importlib.util.find_spec("ultralytics") is not None,
               "blenderproc_executable": shutil.which("blenderproc"),
               "parts_missing_metric_templates": template_problems(base, parts)}
@@ -88,7 +91,7 @@ def doctor(base, parts, segmentor="sam", backbone="vit_h"):
     report["segmentation_ready"] = all(available[m] for m in modules[:12]) and all(report["weights"].values()) and not report["parts_missing_metric_templates"]
     if segmentor == "fastsam":
         report["segmentation_ready"] = report["fastsam_ready"] and weights[1].is_file() and not report["parts_missing_metric_templates"]
-    report["rendering_module_available"] = (ROOT.parents[1] / ".runtime/blender/blender-3.3.1-linux-x64/blender").is_file()
+    report["rendering_module_available"] = (configured_path("blender")).is_file()
     report["render_backend"] = "Blender 3.3.1 standalone; 42 views at 256px, 16 samples"
     report["pose_ready"] = report["segmentation_ready"] and cuda and bool(pem_weights) and bool(report["pointnet2_extensions"]) and all(available[m] for m in ("gorilla", "timm", "einops"))
     return report
@@ -116,7 +119,7 @@ def pose(args, manifest_path, dataset, parts, frames, output):
             if not selected:
                 continue
             part_dir = result_dir / "pose" / part["key"]
-            command = [sys.executable, ROOT.parents[1] / "SAM6D/pipeline/pose_worker.py",
+            command = [sys.executable, PIPELINE / "workers/pose_worker.py",
                        "--output", part_dir / "pose.json", "--cad", base / part["sam_ply"],
                        "--rgb", base / frame["rgb"], "--depth", base / frame["depth"],
                        "--camera", base / frame["camera"], "--detections", part_dir / "selected.json",
@@ -175,7 +178,7 @@ def main():
             return 0
         if args.command == "render":
             for part in parts:
-                command = [sys.executable, ROOT.parents[1] / "SAM6D/pipeline/sam6d_ui/render_reference.py",
+                command = [sys.executable, PIPELINE / "sam6d_ui/render_reference.py",
                      "--mesh", base / part["sam_obj"], "--output", base / part["sam_template_dir"],
                      "--poses", CORE / "Instance_Segmentation_Model/utils/poses/predefined_poses/cam_poses_level0.npy"]
                 run(command, CORE / "Render", args.dry_run)
@@ -185,7 +188,7 @@ def main():
                 key = "segmentation_ready" if args.command == "segment" else "pose_ready"
                 if not report[key]:
                     print(json.dumps(report, indent=2))
-                    raise ValueError("Entorno o plantillas incompletos. Consultar README_PDDL.md y doctor.")
+                    raise ValueError(f"Entorno o plantillas incompletos. Consulta {PIPELINE.parent / 'installation/README.md'} y ejecuta run.sh sam doctor.")
             if args.command == "segment":
                 command = [sys.executable, CORE / "Instance_Segmentation_Model/run_inference_pddl.py",
                            "--manifest", manifest_path, "--output", output,

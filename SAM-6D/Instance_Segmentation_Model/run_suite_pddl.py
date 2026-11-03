@@ -1,5 +1,9 @@
 """Benchmark the original SAM-6D ISM assignment against every prepared CAD."""
 from __future__ import annotations
+import sys as _sys
+from pathlib import Path as _Path
+_cad_root = next(p for p in _Path(__file__).resolve().parents if (p/'config/settings.json').is_file())
+_sys.path.insert(0, str(_cad_root/'pipeline'))
 
 import argparse
 from contextlib import contextmanager
@@ -9,6 +13,8 @@ import json
 from pathlib import Path
 import platform
 import subprocess
+import sys
+import shutil
 import time
 
 from hydra import compose, initialize
@@ -281,10 +287,11 @@ def main():
     parser.add_argument("--stability-score", type=float, default=0.97)
     parser.add_argument("--segmentor", choices=("sam", "fastsam"), default="sam")
     parser.add_argument("--backbone", choices=("vit_h", "vit_l", "vit_b"), default="vit_h")
+    parser.add_argument("--pose",action="store_true",help="Estimate PEM poses of accepted detections")
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--reference-cache", type=Path, required=True)
     args = parser.parse_args()
-    if not (0 <= args.min_score <= args.confidence <= 1) or args.threads < 1:
+    if not (0 <= args.min_score <= args.confidence <= 1) or not 0<=args.stability_score<=1 or args.threads < 1:
         parser.error("Se requiere 0 <= min-score <= confidence <= 1 y threads >= 1.")
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("La salida debe estar vacía: se preservan las ejecuciones anteriores.")
@@ -295,6 +302,7 @@ def main():
     if unknown or not frames or not parts:
         parser.error(f"Selección vacía o capturas desconocidas: {sorted(unknown)}")
     device = choose_device(args.device)
+    if args.pose and device.type!="cuda":parser.error("PEM requiere CUDA")
     torch.set_num_threads(args.threads)
     torch.manual_seed(0)
     np.random.seed(0)
@@ -315,12 +323,12 @@ def main():
                       "nvidia_smi": gpu_diagnostic, "threads": torch.get_num_threads(),
                       "python": platform.python_version(), "cpu": platform.processor()},
            "settings": {"min_score": args.min_score, "confidence": args.confidence,
-                        "stability_score": args.stability_score, "segmentor": args.segmentor, "backbone": args.backbone, "warmup_cases": 0, "repeats": 1,
+                        "stability_score": args.stability_score, "pose":args.pose, "pose_backend":"pem" if args.pose else None, "segmentor": args.segmentor, "backbone": args.backbone, "warmup_cases": 0, "repeats": 1,
                         "filename_used_for_classification": False, "pointcloud_seed_per_cad": True},
            "timing_definitions": {
                "processing_s": "RGB-D read + SAM + DINO + all-CAD comparison + original ISM refinement + RLE; excludes image/file writes and model/reference setup",
                "output_s": "RGB, depth, mask, overlay and detection files written for this case",
-               "case_s": "processing_s + output_s; excludes suite report generation and model/reference setup",
+               "case_s": "processing_s + output_s + optional pose_pipeline_s; excludes suite report generation and ISM model/reference setup",
                "semantic_comparison_s": "Exclusive DINO semantic metric and aggregation for one CAD over all valid proposals; SAM and DINO extraction shared by all CADs",
                "comparison_scores": "All-CAD DINO similarities on the SAME primary proposal; only the assigned CAD receives appearance and geometry refinement as in SAM-6D",
                "zero_comparison_time": "No valid proposal; CAD comparison was not performed",
@@ -331,18 +339,22 @@ def main():
         with measured(run["setup_timing"], "model_load_s", device):
             with initialize(version_base=None, config_path="configs"):
                 cfg = compose(config_name="run_inference.yaml", overrides=["model=ISM_fastsam"] if args.segmentor == "fastsam" else [])
+            run['settings']['stability_score_yaml']=float(cfg.model.segmentor_model.stability_score_thresh) if args.segmentor=='sam' else None
             configure(cfg, args.segmentor, args.backbone, args.stability_score)
             model = instantiate(cfg.model)
             model.eval()
             model.descriptor_model.model.to(device)
             model.descriptor_model.model.device = device
             move_segmentor(model, device, args.segmentor)
+        run['settings']['stability_score_effective']=float(model.segmentor_model.stability_score_thresh) if args.segmentor=='sam' else None
+        run['settings']['stability_score_applies']=args.segmentor=='sam'
+        if args.segmentor=='sam' and not np.isclose(run['settings']['stability_score_effective'],args.stability_score):raise ValueError('SAM no aplicó el umbral solicitado')
         with measured(run["setup_timing"], "references_s", device):
             run["references"] = load_references(model, parts, args.manifest.parent, device, args.reference_cache)
         run["algorithm"] = {"semantic_aggregation": model.matching_config.aggregation_function,
                             "semantic_threshold": float(model.matching_config.confidence_thresh),
                             "nms_iou": float(model.post_processing_config.nms_thresh),
-                            "sam": "vit_h", "dino": "dinov2_vitl14", "views_per_cad": 42,
+                            "sam": args.backbone if args.segmentor=="sam" else "fastsam", "dino": "dinov2_vitl14", "views_per_cad": 42,
                             "final_score": "(semantic + appearance + geometry * visible_ratio) / (2 + visible_ratio)",
                             "worker_sha256": hash_files([Path(__file__)])}
         write_json(args.output / "run.json", run)
@@ -360,7 +372,13 @@ def main():
                 for i, mask in enumerate(masks):
                     Image.fromarray(mask.astype(np.uint8) * 255).save(folder / f"mask_{i:03d}.png")
                 write_json(folder / "detection_ism.json", detections)
-            case["timing"]["case_s"] = case["timing"]["processing_s"] + case["timing"]["output_s"]
+            shutil.copy2(args.manifest.parent/frame['camera'],folder/'camera.json')
+            if args.pose:
+                sys.path.append(str(_cad_root/'pipeline'))
+                from suites.sam6d_suite_pose import run_case_pose
+                case['pose']=run_case_pose(folder,frame,parts,args.manifest.parent,args.confidence)
+                case['timing']['pose_pipeline_s']=case['pose']['elapsed_s']
+            case["timing"]["case_s"] = case["timing"]["processing_s"] + case["timing"]["output_s"] + case["timing"].get("pose_pipeline_s",0)
             write_json(folder / "case.json", case)
             run["frames"].append(case)
             write_json(args.output / "run.json", run)
