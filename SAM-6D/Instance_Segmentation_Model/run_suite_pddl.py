@@ -104,7 +104,8 @@ def hash_files(paths):
 
 def load_references(model, parts, base, device, cache):
     cache.mkdir(parents=True, exist_ok=True)
-    checkpoint = Path("checkpoints/dinov2/dinov2_vitl14_pretrain.pth")
+    from settings import checkpoint as model_checkpoint
+    checkpoint = model_checkpoint("dinov2")
     # All inputs affecting cached float32 descriptors, including extractor code.
     extractor = hash_files([checkpoint, Path("model/dinov2.py"), Path("utils/bbox_utils.py")])
     descriptors, appearance, points, records = [], [], [], []

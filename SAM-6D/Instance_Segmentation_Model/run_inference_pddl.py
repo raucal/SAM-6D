@@ -1,6 +1,11 @@
 """Joint CAD classification of SAM proposals using the official SAM-6D ISM."""
 from __future__ import annotations
 
+import sys as _sys
+from pathlib import Path as _Path
+_cad_root = next(p for p in _Path(__file__).resolve().parents if (p/'config/settings.json').is_file())
+_sys.path.insert(0, str(_cad_root/'pipeline'))
+
 import argparse
 import json
 from pathlib import Path

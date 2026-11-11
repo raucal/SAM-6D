@@ -100,11 +100,12 @@ class CustomDINOv2(pl.LightningModule):
         checkpoint_dir,
         patch_size=14,
         validpatch_thresh=0.5,
+        checkpoint_path=None,
     ):
         super().__init__()
         self.model_name = model_name
         self.model = _make_dinov2_model(arch_name=descriptor_map[model_name], pretrained=False)
-        self.model.load_state_dict(torch.load(osp.join(checkpoint_dir, f"{model_name}_pretrain.pth")))
+        self.model.load_state_dict(torch.load(checkpoint_path or osp.join(checkpoint_dir, f"{model_name}_pretrain.pth")))
         self.validpatch_thresh = validpatch_thresh
         self.token_name = token_name
         self.chunk_size = chunk_size
