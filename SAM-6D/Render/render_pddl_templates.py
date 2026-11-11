@@ -82,12 +82,12 @@ def main():
         depth = cv2.imread(str(scratch / f"depth_{index:04d}.exr"), cv2.IMREAD_UNCHANGED)
         color = cv2.imread(str(scratch / f"rgb_{index:04d}.png"), cv2.IMREAD_UNCHANGED)
         if depth is None or color is None or depth.dtype.kind != "f":
-            raise ValueError("No se ha leído la profundidad EXR en coma flotante.")
+            raise ValueError("Floating-point EXR depth could not be read.")
         if depth.ndim == 3:
             depth = depth[..., 0]
         mask = np.isfinite(depth) & (depth > 0) & (depth < 10)
         if not np.any(mask):
-            raise ValueError(f"Vista sin objeto: {index}")
+            raise ValueError(f"View without an object: {index}")
         # Depth is along camera Z. Blender uses +X/right, +Y/up, -Z/forward.
         xyz_mm = np.zeros((*depth.shape, 3), dtype=np.float32)
         # Invalid background values must not participate in inverse projection.
@@ -99,7 +99,7 @@ def main():
                                 camera_pose=camera_pose, actual_camera_pose=bproc.camera.get_camera_pose(),
                                 scale=scale, bounds=cad.bounds, object_bounds=obj.get_bound_box(),
                                 xyz_bounds=np.stack([xyz_mm[mask].min(0), xyz_mm[mask].max(0)]))
-            raise ValueError(f"XYZ fuera del CAD: {xyz_mm[mask].min(0)} .. {xyz_mm[mask].max(0)}, esperado {cad.bounds}")
+            raise ValueError(f"XYZ outside the CAD: {xyz_mm[mask].min(0)} .. {xyz_mm[mask].max(0)}, expected {cad.bounds}")
         cv2.imwrite(str(folder / f"rgb_{index}.png"), color[..., :3])
         cv2.imwrite(str(folder / f"mask_{index}.png"), mask.astype(np.uint8) * 255)
         np.save(folder / f"xyz_{index}.npy", xyz_mm)

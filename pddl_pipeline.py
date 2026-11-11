@@ -22,10 +22,10 @@ DEFAULT_MANIFEST = PREPARED / "manifest.json"
 def read_dataset(path):
     path = Path(path).resolve()
     if not path.is_file():
-        raise ValueError(f"Primero preparar los datos: falta {path}")
+        raise ValueError(f"Prepare data first: missing {path}")
     data = json.loads(path.read_text())
     if data.get("schema_version") != 1:
-        raise ValueError("Versión de manifest no compatible.")
+        raise ValueError("Unsupported manifest version.")
     return path, data
 
 
@@ -111,7 +111,7 @@ def pose(args, manifest_path, dataset, parts, frames, output):
         result_dir = output / frame["name"]
         source = result_dir / "detection_ism.json"
         if not source.is_file():
-            raise ValueError(f"Primero ejecutar segment: {source}")
+            raise ValueError(f"Run segment first: {source}")
         detections = json.loads(source.read_text())
         combined = []
         for part in parts:

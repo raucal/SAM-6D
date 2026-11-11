@@ -17,6 +17,7 @@ import sys
 import shutil
 import time
 
+from file_utils import write_json
 from hydra import compose, initialize
 from hydra.utils import instantiate
 from segmentor_runtime import configure, move_segmentor
@@ -29,13 +30,6 @@ from model.utils import Detections, mask_to_rle
 from run_inference_pddl import visualize
 from utils.bbox_utils import CropResizePad
 from utils.poses.pose_utils import get_obj_poses_from_template_level, load_index_level_in_level2
-
-
-def write_json(path, value):
-    path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
-    temporary.replace(path)
 
 
 def synchronize(device):
@@ -57,7 +51,7 @@ def measured(timings, name, device):
 def choose_device(requested):
     available = torch.cuda.is_available()
     if requested == "cuda" and not available:
-        raise RuntimeError("Se solicitó CUDA, pero no está disponible; no se ejecutará en CPU silenciosamente.")
+        raise RuntimeError("CUDA was requested but is unavailable; CPU fallback is disabled.")
     return torch.device("cuda" if requested == "cuda" or (requested == "auto" and available) else "cpu")
 
 
@@ -70,7 +64,13 @@ def aggregate(scores, method):
         return scores.max(dim=-1).values
     if method == "avg_5":
         return scores.topk(k=5, dim=-1).values.mean(dim=-1)
-    raise ValueError(f"Agregación desconocida: {method}")
+    raise ValueError(f"Unknown aggregation: {method}")
+
+
+def reject_repeated_region(part_key, bbox, image_size):
+    """Reject vertical option A only in the lower-right scene region."""
+    from region_filters import reject_vertical_option_a_corner
+    return reject_vertical_option_a_corner(part_key, bbox, image_size)
 
 
 def compare_all(model, query, device):
@@ -124,7 +124,7 @@ def load_references(model, parts, base, device, cache):
         if hit:
             data = torch.load(target, map_location="cpu", weights_only=True)
             if data["signature"] != signature:
-                raise ValueError(f"Caché de referencias inconsistente: {target}")
+                raise ValueError(f"Inconsistent reference cache: {target}")
         else:
             print(f"Referencias 42 vistas: {part['key']}", flush=True)
             rgbs, masks, boxes = [], [], []
@@ -133,7 +133,7 @@ def load_references(model, parts, base, device, cache):
                     image = source.convert("L")
                     box = image.getbbox()
                     if box is None:
-                        raise ValueError(f"Plantilla vacía: {part['key']}, {index}")
+                        raise ValueError(f"Empty template: {part['key']}, {index}")
                     mask = torch.from_numpy(np.array(image) / 255).float()
                 with Image.open(folder / f"rgb_{index}.png") as source:
                     rgb = torch.from_numpy(np.array(source.convert("RGB")) / 255).float()
@@ -223,20 +223,29 @@ def process_frame(model, frame, parts, base, device, min_score, confidence):
                 geometry, visible = model.compute_geometric_score(uv, detections, patches, reference, model.visible_thred)
             with measured(timing, "postprocess_s", device):
                 score = (values + appearance + geometry * visible) / (2 + visible)
+                values = torch.as_tensor(values, device=device).reshape(-1)
+                appearance = torch.as_tensor(appearance, device=device).reshape(-1)
+                geometry = torch.as_tensor(geometry, device=device).reshape(-1)
+                visible = torch.as_tensor(visible, device=device).reshape(-1)
+                score = torch.as_tensor(score, device=device).reshape(-1)
                 detections.add_attribute("scores", score)
                 detections.add_attribute("object_ids", objects)
                 detections.add_attribute("semantic_scores", values)
                 detections.add_attribute("appearance_scores", appearance)
                 detections.add_attribute("geometry_scores", geometry)
                 detections.add_attribute("visible_ratios", visible)
-                detections.filter(torch.isfinite(score) & (score >= min_score))
+                keep = torch.isfinite(score) & (score >= min_score)
+                detections.filter(keep)
                 if len(detections):
                     detections.apply_nms_per_object_id(model.post_processing_config.nms_thresh)
                     detections.to_numpy()
                     for i in np.argsort(-detections.scores):
                         part = parts[int(detections.object_ids[i])]
                         x1, y1, x2, y2 = detections.boxes[i].tolist()
+                        bbox = [x1, y1, x2 - x1, y2 - y1]
                         mask = detections.masks[i] > 0.5
+                        if reject_repeated_region(part["key"], bbox, rgb.size):
+                            continue
                         results.append({"scene_id": 0, "image_id": frame["frame_id"],
                                         "category_id": part["category_id"], "part_key": part["key"],
                                         "part_name": part["name"], "proposal_id": int(detections.proposal_ids[i]),
@@ -245,7 +254,7 @@ def process_frame(model, frame, parts, base, device, min_score, confidence):
                                         "appearance_score": float(detections.appearance_scores[i]),
                                         "geometry_score": float(detections.geometry_scores[i]),
                                         "visible_ratio": float(detections.visible_ratios[i]),
-                                        "bbox": [x1, y1, x2 - x1, y2 - y1], "segmentation": mask_to_rle(mask)})
+                                        "bbox": bbox, "segmentation": mask_to_rle(mask)})
                         masks.append(mask)
     with measured(timing, "comparison_export_s", device):
         semantic_cpu = semantic.cpu().tolist() if semantic is not None else []
@@ -294,13 +303,13 @@ def main():
     if not (0 <= args.min_score <= args.confidence <= 1) or not 0<=args.stability_score<=1 or args.threads < 1:
         parser.error("Se requiere 0 <= min-score <= confidence <= 1 y threads >= 1.")
     if args.output.exists() and any(args.output.iterdir()):
-        parser.error("La salida debe estar vacía: se preservan las ejecuciones anteriores.")
+        parser.error("Output must be empty; previous runs are preserved.")
     dataset = json.loads(args.manifest.read_text())
     parts = dataset["parts"]  # Always the full CAD catalog; no class restriction by image name.
     frames = [f for f in dataset["frames"] if not args.frame or f["name"] in args.frame]
     unknown = set(args.frame or ()) - {f["name"] for f in frames}
     if unknown or not frames or not parts:
-        parser.error(f"Selección vacía o capturas desconocidas: {sorted(unknown)}")
+        parser.error(f"Empty selection or unknown captures: {sorted(unknown)}")
     device = choose_device(args.device)
     if args.pose and device.type!="cuda":parser.error("PEM requiere CUDA")
     torch.set_num_threads(args.threads)
@@ -348,7 +357,7 @@ def main():
             move_segmentor(model, device, args.segmentor)
         run['settings']['stability_score_effective']=float(model.segmentor_model.stability_score_thresh) if args.segmentor=='sam' else None
         run['settings']['stability_score_applies']=args.segmentor=='sam'
-        if args.segmentor=='sam' and not np.isclose(run['settings']['stability_score_effective'],args.stability_score):raise ValueError('SAM no aplicó el umbral solicitado')
+        if args.segmentor=='sam' and not np.isclose(run['settings']['stability_score_effective'],args.stability_score):raise ValueError('SAM did not apply the requested threshold')
         with measured(run["setup_timing"], "references_s", device):
             run["references"] = load_references(model, parts, args.manifest.parent, device, args.reference_cache)
         run["algorithm"] = {"semantic_aggregation": model.matching_config.aggregation_function,
@@ -383,7 +392,7 @@ def main():
             run["frames"].append(case)
             write_json(args.output / "run.json", run)
             candidate = case["candidate"]
-            label = candidate["part_key"] if case["recognized"] else "sin identificación fiable"
+            label = candidate["part_key"] if case["recognized"] else "no reliable identification"
             print(f"  {label} | proceso {case['timing']['processing_s']:.3f} s | export {case['timing']['output_s']:.3f} s", flush=True)
         run["status"] = "complete"
     except Exception as error:

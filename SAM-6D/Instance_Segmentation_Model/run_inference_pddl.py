@@ -46,7 +46,7 @@ def load_references(model, parts, base, device):
                 mask = source.convert("L")
                 box = mask.getbbox()
                 if box is None:
-                    raise ValueError(f"Plantilla vacía: {folder}, vista {index}")
+                    raise ValueError(f"Empty template: {folder}, view {index}")
                 mask = torch.from_numpy(np.array(mask) / 255).float()
             with Image.open(folder / f"rgb_{index}.png") as source:
                 rgb = torch.from_numpy(np.array(source.convert("RGB")) / 255).float()
@@ -143,7 +143,7 @@ def main():
     parts = [p for p in dataset["parts"] if not args.part or p["key"] in args.part]
     frames = [f for f in dataset["frames"] if not args.frame or f["name"] in args.frame]
     if not parts or not frames:
-        raise ValueError("Seleccionar al menos una pieza y una captura.")
+        raise ValueError("Select at least one part and one capture.")
     torch.manual_seed(0)
     np.random.seed(0)
     with initialize(version_base=None, config_path="configs"):
