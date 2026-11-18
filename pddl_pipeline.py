@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import sys
 
-from settings import SAM6D as ROOT, CORE, PREPARED, NATIVE, PIPELINE, path as configured_path
+from settings import SAM6D as ROOT, CORE, PREPARED, NATIVE, PIPELINE, path as configured_path, checkpoint
 DEFAULT_MANIFEST = PREPARED / "manifest.json"
 
 
@@ -72,16 +72,13 @@ def doctor(base, parts, segmentor="sam", backbone="vit_h"):
             cuda = torch.cuda.is_available()
         except Exception as error:
             cuda_error = str(error)
-    ism = CORE / "Instance_Segmentation_Model"
-    pem = CORE / "Pose_Estimation_Model"
-    weights = [ism / "checkpoints/segment-anything/sam_vit_h_4b8939.pth",
-               ism / "checkpoints/dinov2/dinov2_vitl14_pretrain.pth",
-               pem / "checkpoints/sam-6d-pem-base.pth"]
-    fastsam_weight = ism / "checkpoints/FastSAM/FastSAM-x.pt"
+    # The same physical checkpoints the application loads (paths.* in config/settings.json).
+    weights = [checkpoint("sam", backbone), checkpoint("dinov2"), checkpoint("pem")]
+    fastsam_weight = checkpoint("fastsam")
     pem_weights = [p for p in weights[2:] if p.is_file() and p.stat().st_size > 0]
     report = {"python": sys.executable, "modules": available,
               "cuda_available": cuda, "cuda_error": cuda_error,
-              "weights": {str(p.relative_to(CORE)): p.is_file() and p.stat().st_size > 0 for p in weights[:2]},
+              "weights": {str(p): p.is_file() and p.stat().st_size > 0 for p in weights[:2]},
               "pem_checkpoints": [str(p) for p in pem_weights],
               "pointnet2_extensions": [str(p) for p in (NATIVE / "pointnet2").glob("*.so")],
               "fastsam_ready": fastsam_weight.is_file() and importlib.util.find_spec("ultralytics") is not None,
